@@ -89,9 +89,8 @@ def _build_model() -> genai.GenerativeModel:
 
 def _send_with_retry(chat, message: str, retries: int = MAX_RETRIES) -> str:
     """
-    Send a message to the Gemini chat session with retry logic.
-    Handles rate limit (429) and transient errors gracefully.
-    Returns the response text, or raises after all retries exhausted.
+    Send a message with retry logic.
+    Correctly identifies rate limit vs connection errors.
     """
     for attempt in range(1, retries + 1):
         try:
@@ -101,22 +100,55 @@ def _send_with_retry(chat, message: str, retries: int = MAX_RETRIES) -> str:
         except Exception as e:
             error_str = str(e).lower()
 
-            if "429" in error_str or "quota" in error_str or "rate" in error_str:
-                wait = RETRY_WAIT_SEC * attempt   # exponential back-off
+            # ── Identify exact error type ──────────────────────
+            is_rate_limit = (
+                "429" in error_str or
+                "quota" in error_str or
+                "rate" in error_str or
+                "resource_exhausted" in error_str
+            )
+
+            is_connection_error = (
+                "503" in error_str or
+                "timeout" in error_str or
+                "handshake" in error_str or
+                "ssl" in error_str or
+                "socket" in error_str or
+                "tcp" in error_str or
+                "unavailable" in error_str or
+                "failed to connect" in error_str
+            )
+
+            # ── Log the REAL error clearly ─────────────────────
+            if is_rate_limit:
+                wait = 60
                 logger.warning(
-                    f"Rate limit hit (attempt {attempt}/{retries}). "
-                    f"Waiting {wait}s before retry..."
+                    f"RATE LIMIT (attempt {attempt}/{retries}). "
+                    f"Waiting {wait}s for quota reset... | Error: {e}"
                 )
                 time.sleep(wait)
 
-            elif attempt < retries:
+            elif is_connection_error:
+                wait = RETRY_WAIT_SEC * attempt
                 logger.warning(
-                    f"API error on attempt {attempt}/{retries}: {e}. Retrying..."
+                    f"CONNECTION ERROR (attempt {attempt}/{retries}). "
+                    f"Waiting {wait}s before retry... | Error: {e}"
                 )
-                time.sleep(RETRY_WAIT_SEC)
+                time.sleep(wait)
 
             else:
-                logger.error(f"All {retries} retries exhausted. Last error: {e}")
+                wait = RETRY_WAIT_SEC
+                logger.warning(
+                    f"UNKNOWN ERROR (attempt {attempt}/{retries}). "
+                    f"Waiting {wait}s before retry... | Error: {e}"
+                )
+                time.sleep(wait)
+
+            if attempt == retries:
+                logger.error(
+                    f"All {retries} retries exhausted. "
+                    f"Final error: {e}"
+                )
                 raise
 
 
